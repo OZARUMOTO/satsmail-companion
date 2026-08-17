@@ -1,0 +1,16 @@
+# Install archives and backups
+*.app
+*.app.bak
+*.bak
+
+# Wallet data — NEVER commit (an xpub reveals every address in the wallet)
+xpub.txt
+xpub.env
+*.xpub
+satsmail-xpub.txt
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
