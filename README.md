@@ -1,4 +1,4 @@
-# Sats Mail — sideload bundle (v0.3.17)
+# Sats Mail — sideload bundle (v0.3.18)
 
 A retro 2009 email client that happens to be a Bitcoin wallet — **taproot only
 (BIP-86)**. Sideloadable on Passport Prime 1.4.0 — **no cable, no computer,
@@ -8,7 +8,7 @@ no airlock**: everything runs through the camera.
 
 | File | What it is |
 |---|---|
-| `satsmail.app` | The install archive (5.0 MiB, v0.3.17, **signed with the OZARUMOTO publisher key**, md5 `81f914f1ea6ec5f8a93e7306ed98ba5a`). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
+| `satsmail.app` | The install archive (5.0 MiB, v0.3.18, **signed with the OZARUMOTO publisher key**, md5 `a9d35b3ec705895533dbd082070c17ae`). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
 | `sync-qr.js` + `ur-bytes.js` | The companion: runs on the box where bwt lives, renders the inbox as an animated QR for the Prime to scan. |
 
 **Box service** — `satsmail-companion` runs `sync-qr.js` from
@@ -42,6 +42,14 @@ blocks until you re-pair).
 
 ## Changelog
 
+- **v0.3.18** — **fix: compose-send "0 BTC available"**. The synced UTXOs
+  are now added as bdk **foreign inputs** (`add_foreign_utxo`) with their
+  own witness_utxo + P2TR satisfaction weight. The old path fed them via
+  `insert_txout`, which stores the txout but never makes it spendable:
+  coin selection filters by outpoints whose parent tx is in the graph with
+  a chain anchor, so a fresh on-device wallet saw 0 UTXOs and every send
+  failed with `Insufficient funds: 0 BTC available`. Regression test
+  reproduces the exact failure and now covers build → sign → extract.
 - **v0.3.17** — **paranoid send** (all QR, no new deps):
   - **type-the-amount-twice** — the compose preview's "sign & send" button
     stays locked until you re-type the exact amount (Coldcard-style).
