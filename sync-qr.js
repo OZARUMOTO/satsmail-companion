@@ -522,12 +522,20 @@ async function liveMempool(txid) {
   // bwt doesn't implement headers.get_tip, but headers.subscribe returns the
   // current tip as its first response ({ height, hex }).
   const tip = await rpc('blockchain.headers.subscribe', []).catch(() => null);
-  const next_fee = await estimateFeeSatVb(1);
+  // The three congestion horizons for the bar: next block, ~6 blocks, ~1 day.
+  // Same estimates the sync page's fee presets use.
+  const [fee_1, fee_6, fee_144] = await Promise.all([
+    estimateFeeSatVb(1),
+    estimateFeeSatVb(6),
+    estimateFeeSatVb(144),
+  ]);
   return {
     height: tip ? tip.height : null,
-    next_fee,
     age_sec: b ? Math.floor((Date.now() - b.at) / 1000) : null,
     fee_rate: b ? b.fee_rate : null,
+    fee_1,
+    fee_6,
+    fee_144,
   };
 }
 
@@ -553,19 +561,33 @@ img{width:min(80vw,480px);height:min(80vw,480px);image-rendering:pixelated;backg
 <script>
 const txid = ${JSON.stringify(txid)};
 function fmtAge(s){if(s==null)return null;if(s<60)return s+'s';const m=Math.floor(s/60);const r=s%60;return m+'m'+(r?' '+r+'s':'');}
+// congestion bar: three time-horizon chips lit green when our fee clears them
 function renderLive(j){
-  const parts=[];
-  if(j.age_sec!=null)parts.push('waiting '+fmtAge(j.age_sec));
-  if(j.height!=null)parts.push('height '+j.height);
-  if(j.fee_rate!=null&&j.next_fee!=null){
-    parts.push('your '+j.fee_rate+' sat/vB vs next-block '+j.next_fee+' sat/vB'+(j.fee_rate>=j.next_fee?' ✓ competitive':' — may wait'));
-  }else if(j.fee_rate!=null){parts.push('your fee '+j.fee_rate+' sat/vB');}
-  return parts.join(' · ');
+  const lines=[];const chips=[];
+  if(j.fee_rate!=null){
+    const horizons=[['1B',j.fee_1],['6B',j.fee_6],['1D',j.fee_144]];
+    for(const h of horizons){const label=h[0],est=h[1];if(est==null)continue;const ok=j.fee_rate>=est;
+      chips.push('<span style="display:inline-block;min-width:26px;text-align:center;margin-right:4px;padding:2px 4px;border-radius:3px;background:'+(ok?'#1d3a2a':'#3a2a1d')+';color:'+(ok?'#7ee787':'#e3b341')+';border:1px solid '+(ok?'#7ee787':'#e3b341')+'">'+label+'</span>');}
+    if(chips.length){
+      let verdict;
+      if(j.fee_1!=null&&j.fee_rate>=j.fee_1)verdict='clears next block ✓';
+      else if(j.fee_6!=null&&j.fee_rate>=j.fee_6)verdict='clears within ~6 blocks';
+      else if(j.fee_144!=null&&j.fee_rate>=j.fee_144)verdict='clears within ~1 day';
+      else verdict='below estimates — may wait';
+      lines.push(chips.join('')+' <span style="color:#9aa2ad">'+verdict+'</span>');
+    }
+  }
+  const meta=[];
+  if(j.age_sec!=null)meta.push('waiting '+fmtAge(j.age_sec));
+  if(j.height!=null)meta.push('height '+j.height);
+  if(j.fee_rate!=null)meta.push('your '+j.fee_rate+' sat/vB');
+  if(meta.length)lines.push(meta.join(' · '));
+  return lines.join('<br>');
 }
 function apply(j){
   document.getElementById('st').textContent=j.label;
   document.getElementById('st').style.color=j.status==='confirmed'?'#7ee787':'#e3b341';
-  document.getElementById('live').textContent=renderLive(j);
+  document.getElementById('live').innerHTML=renderLive(j);
   if(j.status==='confirmed'){
     document.querySelector('img').src=j.qr;
     document.querySelector('pre').textContent='satsmail-receipt:'+j.status+':'+txid+(j.confs?':'+j.confs:'');
@@ -582,17 +604,35 @@ setInterval(async () => {
 }
 
 // Server-side twin of the page's renderLive — builds the initial live-panel
-// text so it's filled on first paint, not after the first 5 s poll.
+// HTML so it's filled on first paint, not after the first 5 s poll.
+// The congestion bar: three time-horizon chips (next block / ~6 blocks /
+// ~1 day) lit green when OUR fee clears that horizon's estimate, plus a
+// plain-language verdict. All fields null-safe.
 function renderLive(live) {
-  const parts = [];
-  if (live.age_sec != null) parts.push('waiting ' + fmtAge(live.age_sec));
-  if (live.height != null) parts.push('height ' + live.height);
-  if (live.fee_rate != null && live.next_fee != null) {
-    parts.push('your ' + live.fee_rate + ' sat/vB vs next-block ' + live.next_fee + ' sat/vB' + (live.fee_rate >= live.next_fee ? ' ✓ competitive' : ' — may wait'));
-  } else if (live.fee_rate != null) {
-    parts.push('your fee ' + live.fee_rate + ' sat/vB');
+  const lines = [];
+  const chips = [];
+  if (live.fee_rate != null) {
+    const horizons = [['1B', live.fee_1], ['6B', live.fee_6], ['1D', live.fee_144]];
+    for (const [label, est] of horizons) {
+      if (est == null) continue;
+      const ok = live.fee_rate >= est;
+      chips.push('<span style="display:inline-block;min-width:26px;text-align:center;margin-right:4px;padding:2px 4px;border-radius:3px;background:' + (ok ? '#1d3a2a' : '#3a2a1d') + ';color:' + (ok ? '#7ee787' : '#e3b341') + ';border:1px solid ' + (ok ? '#7ee787' : '#e3b341') + '">' + label + '</span>');
+    }
+    if (chips.length) {
+      let verdict;
+      if (live.fee_1 != null && live.fee_rate >= live.fee_1) verdict = 'clears next block ✓';
+      else if (live.fee_6 != null && live.fee_rate >= live.fee_6) verdict = 'clears within ~6 blocks';
+      else if (live.fee_144 != null && live.fee_rate >= live.fee_144) verdict = 'clears within ~1 day';
+      else verdict = 'below estimates — may wait';
+      lines.push(chips.join('') + ' <span style="color:#9aa2ad">' + verdict + '</span>');
+    }
   }
-  return parts.join(' · ');
+  const meta = [];
+  if (live.age_sec != null) meta.push('waiting ' + fmtAge(live.age_sec));
+  if (live.height != null) meta.push('height ' + live.height);
+  if (live.fee_rate != null) meta.push('your ' + live.fee_rate + ' sat/vB');
+  if (meta.length) lines.push(meta.join(' · '));
+  return lines.join('<br>');
 }
 
 function fmtAge(sec) {
