@@ -1,4 +1,4 @@
-# Sats Mail — sideload bundle (v0.3.14)
+# Sats Mail — sideload bundle (v0.3.16)
 
 A retro 2009 email client that happens to be a Bitcoin wallet — **taproot only
 (BIP-86)**. Sideloadable on Passport Prime 1.4.0 — **no cable, no computer,
@@ -8,7 +8,7 @@ no airlock**: everything runs through the camera.
 
 | File | What it is |
 |---|---|
-| `satsmail.app` | The install archive (3.7 MiB, v0.3.14, **signed with the OZARUMOTO publisher key**). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
+| `satsmail.app` | The install archive (3.7 MiB, v0.3.16, **signed with the OZARUMOTO publisher key**). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
 | `sync-qr.js` + `ur-bytes.js` | The companion: runs on the box where bwt lives, renders the inbox as an animated QR for the Prime to scan. |
 
 **Box service** — `satsmail-companion` runs `sync-qr.js` from
@@ -20,6 +20,37 @@ allow 8082 from the LAN — see `box-setup.md` for the exact subnets.
 ## Install
 
 1. Copy `satsmail.app` to the SD card / USB-C drive.
+
+## ⚡ Pair the box first (v0.3.16+)
+
+Since v0.3.16 every sync QR is **HMAC-authenticated**. The box holds a
+32-byte secret (`~/satsmail-companion/pairing-secret`, 0600); the Prime
+stores the same secret after one scan:
+
+1. On the box: **redeploy `sync-qr.js`** (this bundle) and restart the
+   `satsmail-companion` service — it generates the secret on first start.
+2. Open `http://$BOX_IP:8082/pair` on your phone.
+3. On the Prime: Sats Mail → inbox → **"pair with box"** → scan that QR once.
+4. Done — the inbox footer shows `pairing: paired`. From now on **any sync
+   QR that isn't signed by that secret is rejected** ("auth failed — sync qr
+   is not from your box"), so a fake page on the phone can't feed you a fake
+   balance.
+
+Re-pairing (scanning `/pair` again) **rotates** the secret — the old one
+stops working. Tap the pairing footer on the inbox to **unpair** (sync then
+blocks until you re-pair).
+
+## Changelog
+
+- **v0.3.16** — **paranoid sync**: added HMAC-SHA256 authentication to the
+  QR sync channel. The box signs every payload with a pairing secret
+  (`/pair` page, stored in `~/satsmail-companion/pairing-secret`); the Prime
+  verifies after a one-time "pair with box" scan and refuses anything that
+  doesn't match (bad tag, missing tag, or replayed/stale payloads). Secret
+  lives in the app's encrypted AppData. HMAC is hand-rolled on `sha2` and
+  verified against the RFC 4231 vectors; the canonical JSON re-serialization
+  is unit-tested byte-identical to the companion's signing input.
+- **v0.3.15** — new launcher icon: a bitcoin-orange envelope glyph (replaces
 2. Insert into the Prime → **Settings → Apps → Install App** → pick it.
 3. Launch Sats Mail. On first launch it asks for **seed access** (the
    app-scoped seed, `device-secrets.app-scoped-seed`) — **approve the
@@ -90,6 +121,13 @@ Notes:
 
 ## Changelog
 
+- **v0.3.15** — new launcher icon: a bitcoin-orange envelope glyph (replaces
+  the SDK template's teal diamond slab). The old icon was a full-canvas
+  background that rendered as a square over the launcher's round badge;
+  the new one is a 110×110 transparent-glyph icon per the SDK 1.0.0 icon
+  rules (8-point transparency check passed). `icon.bin` dropped from
+  48,456 → 15,864 bytes. **Reboot the Prime after sideloading** — the
+  launcher caches the tile per app-id and only refreshes on reboot.
 - **v0.3.14** — switched signing identity from the SDK's `KeyOS` dev cert to
   the **OZARUMOTO publisher cert** (`signing-identity = "OZARUMOTO"` in
   `app-config.toml`; the stale `cosign2.toml` secret path was fixed to the

@@ -68,6 +68,28 @@ ssh mikegotbtc@$BOX_IP 'sudo systemctl restart satsmail-companion'
 curl -s $BOX_IP:8082 | head -5        # sanity: page + "frame 1 / N" + balance line
 ```
 
+## HMAC pairing (v0.3.16+) — authenticate the QR channel
+
+Every sync QR is now signed with a **pairing secret**. The first
+`satsmail-companion` start generates `~/satsmail-companion/pairing-secret`
+(32 random bytes, hex, 0600). The Prime must learn it once:
+
+```bash
+# after deploying sync-qr.js v0.3.16+: open the pairing page on a phone
+# and scan it from Sats Mail → inbox → "pair with box"
+open http://$BOX_IP:8082/pair
+```
+
+- The secret is the HMAC key for every sync payload — anyone with it can
+  impersonate the box. Keep the file 0600; it's not backed up (re-pairing is
+  one scan). `SATMAIL_PAIRING_SECRET` env overrides the file.
+- Re-scanning `/pair` **rotates** the secret (old one stops working) — that's
+  the unpair/rotate flow.
+- If the Prime ever shows "auth failed — sync qr is not from your box", the
+  QR source doesn't hold the secret: re-pair, or check the box service is
+  running the current `sync-qr.js` (a stale copy signs with a different
+  secret or no tag at all).
+
 ## How it works (short version)
 
 `sync-qr.js` queries bwt for the satsmail xpub's BIP-86 taproot scripthashes,
@@ -85,3 +107,5 @@ broadcast page.
 3. Restore `xpub.txt` / `xpub.env` (from the device: Sats Mail → Compose → export xpub)
 4. `sudo systemctl enable --now satsmail-companion bwt`
 5. Open `http://$BOX_IP:8082` on a phone, scan from the Prime (Sats Mail → > send → sync from qr)
+6. Open `http://$BOX_IP:8082/pair` → Sats Mail → inbox → "pair with box" → scan
+   (sync is HMAC-authenticated from then on; without pairing it blocks)

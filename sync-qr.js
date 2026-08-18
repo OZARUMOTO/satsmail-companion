@@ -47,6 +47,35 @@ const XPUB = process.env.SATMAIL_XPUB
 const LOOKAHEAD_EXT = 20;
 const LOOKAHEAD_INT = 10;
 
+// ── pairing secret (HMAC auth of the sync channel) ────────────────────────
+// The Prime is air-gapped and its only transport is the camera, so a sync QR
+// could come from ANY page — including a fake one on the phone. To fix that,
+// the box generates a 32-byte secret once, shows it on /pair as
+// `satsmail-pair:<hex>`, and the Prime stores it after one scan ("pair with
+// box"). Every sync payload after that carries an HMAC-SHA256 tag computed
+// with this secret; the device recomputes it and REFUSES any payload that
+// doesn't match. Without the secret a fake QR can't authenticate.
+//
+// The secret persists in ./pairing-secret (0600) next to this script; set
+// SATMAIL_PAIRING_SECRET to override (e.g. from a vault). Keep it secret:
+// anyone with it can impersonate the box.
+const crypto = require('crypto');
+const PAIR_PREFIX = 'satsmail-pair:';
+function pairingSecret() {
+  if (process.env.SATMAIL_PAIRING_SECRET) return process.env.SATMAIL_PAIRING_SECRET.trim();
+  const file = __dirname + '/pairing-secret';
+  if (fs.existsSync(file)) {
+    const s = fs.readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/i.test(s)) return s;
+    console.error('pairing-secret is not a 64-char hex string — regenerating');
+  }
+  const s = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(file, s + '\n', { mode: 0o600 });
+  console.log('generated new pairing secret -> ' + file + ' (scan /pair once with Satsmail)');
+  return s;
+}
+const PAIRING_SECRET = pairingSecret();
+
 const { BIP32Factory } = require('bip32');
 const bitcoin = require('bitcoinjs-lib');
 const ecc = require('tiny-secp256k1');
@@ -221,8 +250,15 @@ async function buildPage() {
   const broadcast_base = process.env.BROADCAST_BASE
     || `http://127.0.0.1:${HTTP_PORT}/broadcast`;
 
-  const payload = { balance_sats, generated_at: Math.floor(Date.now() / 1000), mails, utxos, fee_rates, broadcast_base };
-  console.log(`synced: ${mails.length} mails, ${balance_sats} sats, ${utxos.length} utxos, fees ${fee_rates.low}/${fee_rates.medium}/${fee_rates.high}`);
+  // HMAC-auth the payload: the device re-derives the exact canonical bytes
+  // (same key order as the Rust QrSyncPayload struct) and recomputes this tag
+  // with the pairing secret. Never change the key order here without matching
+  // src/sync.rs — a mismatch makes every sync read as "auth failed".
+  const generated_at = Math.floor(Date.now() / 1000);
+  const canonical = JSON.stringify({ balance_sats, generated_at, mails, utxos, fee_rates, broadcast_base });
+  const hmac = crypto.createHmac('sha256', Buffer.from(PAIRING_SECRET, 'hex')).update(canonical).digest('hex');
+  const payload = { balance_sats, generated_at, mails, utxos, fee_rates, broadcast_base, hmac };
+  console.log(`synced: ${mails.length} mails, ${balance_sats} sats, ${utxos.length} utxos, fees ${fee_rates.low}/${fee_rates.medium}/${fee_rates.high} (hmac authed)`);
 
   // ── animated UR2 bytes QR page ───────────────────────────────────────────
   // Pre-render EVERY frame server-side to a data-URL PNG. The browser just
@@ -308,6 +344,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /pair — one-time pairing: shows the secret as a plain-text QR
+  // (`satsmail-pair:<hex>`). Scan it once with Satsmail → "pair with box".
+  // The page stays up; re-scanning just re-pairs (rotates to a NEW secret,
+  // which also invalidates the old one — that's the unpair/rotate flow).
+  if (p.pathname === '/pair') {
+    const QRCode = require('qrcode');
+    const qr = await QRCode.toDataURL(PAIR_PREFIX + PAIRING_SECRET, { errorCorrectionLevel: 'M', margin: 4, width: 640 });
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>satsmail pairing</title>
+<style>body{background:#000;color:#fff;font-family:monospace;display:flex;flex-direction:column;align-items:center;margin:24px}
+img{width:min(80vw,480px);height:min(80vw,480px);image-rendering:pixelated}
+pre{font-size:12px;color:#888;word-break:break-all;max-width:90vw}</style></head>
+<body><img src="${qr}">
+<div style="font-size:15px;padding:10px">open Satsmail → inbox → <b>pair with box</b> → scan this QR once</div>
+<pre>${PAIR_PREFIX}${PAIRING_SECRET}</pre>
+<div style="font-size:12px;color:#666;padding-top:8px">the secret lives in <code>~/satsmail-companion/pairing-secret</code> (0600).
+Redeploying this page generates a NEW secret — re-scan to re-pair.</div>
+</body></html>`);
+    return;
+  }
+
   // GET / — the sync QR page (default)
   if (!page) await refreshPage();
   const f0 = page.frameImgs[0] || '';
@@ -319,6 +378,7 @@ img#c{width:min(92vw,640px);height:min(92vw,640px);image-rendering:pixelated}
 #st{font-size:14px;padding:8px;color:#888;text-align:center}#n{font-size:18px}</style></head>
 <body><img id="c" src="${f0}"><div id="n">frame 1 / ${page.frameImgs.length}</div>
 <div id="st">satsmail sync — ${page.status}</div>
+<div style="font-size:11px;color:#555;padding:6px">hmac-authenticated · pair page: /pair</div>
 <script>
 let frames = ${JSON.stringify(page.frameImgs)};
 let version = ${JSON.stringify(page.version)};
