@@ -468,7 +468,10 @@ function receiptText(st, txid) {
 async function txStatus(txid) {
   let confs = 0;
   try {
-    const tx = await rpc('blockchain.transaction.get', [txid]);
+    // verbose=true — bwt returns the raw hex string without it, so
+    // confirmations would be undefined and every tx would read as mempool
+    // forever (the sync code passes true; this must too).
+    const tx = await rpc('blockchain.transaction.get', [txid, true]);
     confs = Math.max(0, (tx && tx.confirmations) || 0);
   } catch { /* not found yet — still in mempool */ }
   if (confs > 0) return { status: 'confirmed', label: confs + ' confirmations', confs };
