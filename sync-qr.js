@@ -344,6 +344,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /receipt?txid=… — the broadcast-receipt loop. After /broadcast
+  // succeeds it redirects here; this page shows a QR the Prime scans with
+  // "verify broadcast". The QR text is `satsmail-receipt:<status>:<txid>
+  // [:confs]` and the Prime compares the txid against the one IT computed
+  // from the signed tx — a lying box can't fake that, because the txid is a
+  // hash of the very bytes the Prime produced. Polls /txstatus so the QR
+  // upgrades from mempool → confirmed as confirmations arrive.
+  if (p.pathname === '/receipt') {
+    const QRCode = require('qrcode');
+    const txid = (p.query.txid || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(txid)) {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><html><body style="background:#0d0f12;color:#e8e6e3;font-family:monospace;text-align:center;padding:40px">missing txid — go back to the broadcast page and broadcast again</body></html>');
+      return;
+    }
+    const st = await txStatus(txid);
+    const qr = await QRCode.toDataURL(receiptText(st, txid), { errorCorrectionLevel: 'M', margin: 4, width: 640 });
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(receiptHtml(txid, qr, st));
+    return;
+  }
+
+  // GET /txstatus?txid=… — polled by the /receipt page every 5 s; returns
+  // the current status plus a freshly pre-rendered receipt QR so the page
+  // can swap the image as the tx confirms.
+  if (p.pathname === '/txstatus') {
+    const QRCode = require('qrcode');
+    const txid = (p.query.txid || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(txid)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'bad txid' }));
+      return;
+    }
+    const st = await txStatus(txid);
+    const qr = await QRCode.toDataURL(receiptText(st, txid), { errorCorrectionLevel: 'M', margin: 4, width: 640 });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: st.status, label: st.label, confs: st.confs, qr }));
+    return;
+  }
+
   // GET /pair — one-time pairing: shows the secret as a plain-text QR
   // (`satsmail-pair:<hex>`). Scan it once with Satsmail → "pair with box".
   // The page stays up; re-scanning just re-pairs (rotates to a NEW secret,
@@ -414,6 +454,57 @@ server.listen(HTTP_PORT, '0.0.0.0', () => {
 refreshPage();
 setInterval(refreshPage, 30000);
 
+// The receipt QR text the Prime's "verify broadcast" scanner expects:
+// `satsmail-receipt:<status>:<txid>[:<confs>]` (mirrors src/send.rs
+// parse_receipt exactly — never change the shape without matching it).
+function receiptText(st, txid) {
+  return 'satsmail-receipt:' + st.status + ':' + txid + (st.confs ? ':' + st.confs : '');
+}
+
+// Current status of a broadcast tx from bwt: mempool until it has at least
+// one confirmation (bwt's transaction.get returns confirmations, 0 = mempool).
+async function txStatus(txid) {
+  let confs = 0;
+  try {
+    const tx = await rpc('blockchain.transaction.get', [txid]);
+    confs = Math.max(0, (tx && tx.confirmations) || 0);
+  } catch { /* not found yet — still in mempool */ }
+  if (confs > 0) return { status: 'confirmed', label: confs + ' confirmations', confs };
+  return { status: 'mempool', label: 'in mempool — waiting for confirmation', confs: 0 };
+}
+
+// The /receipt page: big QR the Prime scans, status line, and a poller that
+// swaps the QR when the tx confirms.
+function receiptHtml(txid, qr, st) {
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>satsmail receipt</title>
+<style>body{background:#0d0f12;color:#e8e6e3;font-family:ui-monospace,Menlo,monospace;display:flex;flex-direction:column;align-items:center;padding:16px;min-height:100vh}
+h1{font-size:18px;letter-spacing:1px}p{color:#9aa2ad;font-size:12px;max-width:440px;text-align:center}
+img{width:min(80vw,480px);height:min(80vw,480px);image-rendering:pixelated;background:#fff;padding:8px;border-radius:8px}
+#st{font-size:13px;color:#7ee787;padding:8px}pre{font-size:11px;color:#888;word-break:break-all;max-width:90vw}</style></head>
+<body><h1>BROADCAST RECEIPT</h1>
+<p>Hold the Prime scanner to this QR (Sats Mail → send → <b>verify broadcast</b>) — it checks the txid against the one the Prime computed from the tx it signed.</p>
+<img src="${qr}">
+<div id="st">${st.label}</div>
+<pre>${receiptText(st, txid)}</pre>
+<div style="font-size:12px;color:#666;padding-top:8px">the receipt updates automatically as confirmations arrive — keep this page open.</div>
+<script>
+const txid = ${JSON.stringify(txid)};
+setInterval(async () => {
+  try {
+    const r = await fetch('/txstatus?txid=' + encodeURIComponent(txid));
+    const j = await r.json();
+    if (j.status === 'confirmed') {
+      document.getElementById('st').textContent = j.label;
+      document.querySelector('img').src = j.qr;
+      document.querySelector('pre').textContent = 'satsmail-receipt:' + j.status + ':' + txid + (j.confs ? ':' + j.confs : '');
+    }
+  } catch (e) { /* phone briefly offline — keep the current QR */ }
+}, 5000);
+</script></body></html>`;
+}
+
 // The /broadcast page: decodes the #t=/#c= fragment the device QR carries,
 // verifies the checksum, and POSTs the hex to /pushtx on this same box.
 function pushtxHtml() {
@@ -465,7 +556,7 @@ function setResult(id,html,cls){var node=el(id);node.innerHTML=html;node.classNa
 function broadcast(txhex,resultId,btn){if(btn)btn.disabled=true;setResult(resultId,'sending to your node…','meta');
 fetch('/pushtx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tx:txhex})})
 .then(function(r){return r.json().catch(function(){return{ok:false,error:'HTTP '+r.status};});})
-.then(function(j){if(j&&j.ok&&j.txid){setResult(resultId,'✓ BROADCAST — txid: <b>'+j.txid+'</b>','ok');}else{setResult(resultId,'✗ '+(j&&j.error?j.error:'relay error'),'err');}})
+.then(function(j){if(j&&j.ok&&j.txid){setResult(resultId,'✓ BROADCAST — txid: <b>'+j.txid+'</b>','ok');setTimeout(function(){location.href='/receipt?txid='+encodeURIComponent(j.txid);},1500);}else{setResult(resultId,'✗ '+(j&&j.error?j.error:'relay error'),'err');}})
 .catch(function(e){setResult(resultId,'✗ could not reach the relay: '+e,'err');})
 .finally(function(){if(btn)btn.disabled=false;});}
 el('broadcast').addEventListener('click',function(){broadcast(txHex,'result',el('broadcast'));});

@@ -1,4 +1,4 @@
-# Sats Mail — sideload bundle (v0.3.16)
+# Sats Mail — sideload bundle (v0.3.17)
 
 A retro 2009 email client that happens to be a Bitcoin wallet — **taproot only
 (BIP-86)**. Sideloadable on Passport Prime 1.4.0 — **no cable, no computer,
@@ -8,7 +8,7 @@ no airlock**: everything runs through the camera.
 
 | File | What it is |
 |---|---|
-| `satsmail.app` | The install archive (3.7 MiB, v0.3.16, **signed with the OZARUMOTO publisher key**). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
+| `satsmail.app` | The install archive (5.0 MiB, v0.3.17, **signed with the OZARUMOTO publisher key**, md5 `81f914f1ea6ec5f8a93e7306ed98ba5a`). Copy to the SD/USB-C drive → Settings → Apps → Install App. **Allow the OZARUMOTO publisher on the Prime first** (`foundation cert install OZARUMOTO`, fingerprint in the app repo's `PUBLISHER.md`). |
 | `sync-qr.js` + `ur-bytes.js` | The companion: runs on the box where bwt lives, renders the inbox as an animated QR for the Prime to scan. |
 
 **Box service** — `satsmail-companion` runs `sync-qr.js` from
@@ -42,6 +42,19 @@ blocks until you re-pair).
 
 ## Changelog
 
+- **v0.3.17** — **paranoid send** (all QR, no new deps):
+  - **type-the-amount-twice** — the compose preview's "sign & send" button
+    stays locked until you re-type the exact amount (Coldcard-style).
+  - **change-address proof** — the compose preview shows the change output
+    and its derivation path (`m/86'/0'/0'/1/<n>`), matched against the
+    device's internal keychain on-device (or "none — exact spend").
+  - **broadcast-receipt loop** — after the box broadcasts, it shows a receipt
+    QR (`satsmail-receipt:<status>:<txid>`, `/receipt` page). The done
+    screen now shows the expected txid (computed on-device from the signed
+    tx) + a **verify broadcast** button: scan the receipt and the Prime
+    compares txids — a lying box can't fake a hash of the tx the Prime
+    itself signed. The receipt QR upgrades from mempool → confirmed as
+    confirmations arrive.
 - **v0.3.16** — **paranoid sync**: added HMAC-SHA256 authentication to the
   QR sync channel. The box signs every payload with a pairing secret
   (`/pair` page, stored in `~/satsmail-companion/pairing-secret`); the Prime
@@ -65,6 +78,12 @@ blocks until you re-pair).
 - **> send** — scan a PSBT from the phone → verified against your key →
   preview → sign on-device (key-path taproot) → animated signed-PSBT QR out
   for the phone to broadcast. Fully offline.
+- **> send → compose send** — scan a plain address QR → type amount + fee →
+  on-device build preview showing the **change address + derivation path** →
+  **re-type the amount to unlock sign** → signed-tx QR out. After the box
+  broadcasts, **verify broadcast** scans the box's receipt QR and checks the
+  txid against the one the Prime computed — the send loop closes with proof,
+  not vibes.
 - **sync from qr** (inbox) — scan the companion's animated QR → inbox +
   balance update. No electrum, no cable.
 - **account xpub** — shown on Compose; the box's bwt must track this for the
