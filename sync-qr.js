@@ -334,6 +334,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const txid = await rpc('blockchain.transaction.broadcast', [tx]);
       console.log(`broadcast ok: ${txid}`);
+      await captureBroadcast(txid, tx); // best-effort: fee/vsize for the live panel
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, txid }));
     } catch (e) {
@@ -362,13 +363,14 @@ const server = http.createServer(async (req, res) => {
     const st = await txStatus(txid);
     const qr = await QRCode.toDataURL(receiptText(st, txid), { errorCorrectionLevel: 'M', margin: 4, width: 640 });
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(receiptHtml(txid, qr, st));
+    res.end(receiptHtml(txid, qr, st, await liveMempool(txid)));
     return;
   }
 
   // GET /txstatus?txid=… — polled by the /receipt page every 5 s; returns
-  // the current status plus a freshly pre-rendered receipt QR so the page
-  // can swap the image as the tx confirms.
+  // the current status, a freshly pre-rendered receipt QR so the page can
+  // swap the image as the tx confirms, plus live mempool stats for the
+  // panel under the QR (waiting time, block height, your fee vs next-block).
   if (p.pathname === '/txstatus') {
     const QRCode = require('qrcode');
     const txid = (p.query.txid || '').toLowerCase();
@@ -380,7 +382,7 @@ const server = http.createServer(async (req, res) => {
     const st = await txStatus(txid);
     const qr = await QRCode.toDataURL(receiptText(st, txid), { errorCorrectionLevel: 'M', margin: 4, width: 640 });
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: st.status, label: st.label, confs: st.confs, qr }));
+    res.end(JSON.stringify(Object.assign({ status: st.status, label: st.label, confs: st.confs, qr }, await liveMempool(txid))));
     return;
   }
 
@@ -473,36 +475,129 @@ async function txStatus(txid) {
   return { status: 'mempool', label: 'in mempool — waiting for confirmation', confs: 0 };
 }
 
-// The /receipt page: big QR the Prime scans, status line, and a poller that
-// swaps the QR when the tx confirms.
-function receiptHtml(txid, qr, st) {
+// ── live mempool panel (receipt page) ─────────────────────────────────────
+// Best-effort stats so the receipt page can show the wait live: how long the
+// tx has been in the mempool, the current chain height, and the tx's own fee
+// rate vs what the node estimates for the next block. Every field is
+// null-safe — a failure anywhere just leaves that stat out, never breaks the
+// page or the broadcast.
+const broadcasts = {}; // txid -> { at, fee_sat, vsize, fee_rate }
+
+// Compute fee + vsize of a just-broadcast tx (needs the prev txs for input
+// values — bwt's verbose get has no prevout). bitcoinjs-lib parses the hex.
+async function captureBroadcast(txid, txHex) {
+  try {
+    const t = bitcoin.Transaction.fromHex(txHex);
+    const vsize = t.virtualSize();
+    const outSum = t.outs.reduce((s, o) => s + o.value, 0);
+    let inSum = 0;
+    for (const inp of t.ins) {
+      // inp.hash is internal byte order — flip to display order for electrum.
+      const prevHex = await rpc('blockchain.transaction.get', [Buffer.from(inp.hash).reverse().toString('hex'), false]);
+      const prev = bitcoin.Transaction.fromHex(prevHex);
+      inSum += prev.outs[inp.index].value;
+    }
+    const fee = inSum - outSum;
+    broadcasts[txid] = { at: Date.now(), fee_sat: fee, vsize, fee_rate: Math.max(0, Math.round(fee / vsize)) };
+  } catch (e) {
+    console.error(`captureBroadcast: ${e.message}`);
+  }
+}
+
+// estimatefee returns BTC/kB; convert to sat/vB. Null when bwt has no estimate.
+async function estimateFeeSatVb(blocks) {
+  try {
+    const r = await rpc('blockchain.estimatefee', [blocks]);
+    return (typeof r === 'number' && r > 0) ? Math.max(1, Math.round(r * 1e5)) : null;
+  } catch { return null; }
+}
+
+// One live-mempool snapshot for a tx: waiting time, chain height, your fee
+// vs the next-block fee. All fields null-safe.
+async function liveMempool(txid) {
+  const b = broadcasts[txid] || null;
+  // bwt doesn't implement headers.get_tip, but headers.subscribe returns the
+  // current tip as its first response ({ height, hex }).
+  const tip = await rpc('blockchain.headers.subscribe', []).catch(() => null);
+  const next_fee = await estimateFeeSatVb(1);
+  return {
+    height: tip ? tip.height : null,
+    next_fee,
+    age_sec: b ? Math.floor((Date.now() - b.at) / 1000) : null,
+    fee_rate: b ? b.fee_rate : null,
+  };
+}
+
+// The /receipt page: big QR the Prime scans, status line, a LIVE mempool
+// panel under the QR, and a poller that swaps the QR when the tx confirms.
+function receiptHtml(txid, qr, st, live) {
+  live = live || {};
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>satsmail receipt</title>
 <style>body{background:#0d0f12;color:#e8e6e3;font-family:ui-monospace,Menlo,monospace;display:flex;flex-direction:column;align-items:center;padding:16px;min-height:100vh}
 h1{font-size:18px;letter-spacing:1px}p{color:#9aa2ad;font-size:12px;max-width:440px;text-align:center}
 img{width:min(80vw,480px);height:min(80vw,480px);image-rendering:pixelated;background:#fff;padding:8px;border-radius:8px}
-#st{font-size:13px;color:#7ee787;padding:8px}pre{font-size:11px;color:#888;word-break:break-all;max-width:90vw}</style></head>
+#st{font-size:14px;color:#e3b341;padding:8px}pre{font-size:11px;color:#888;word-break:break-all;max-width:90vw}
+#live{font-size:12px;color:#7ee787;padding:4px 8px 12px;text-align:center;line-height:1.6;max-width:440px}</style></head>
 <body><h1>BROADCAST RECEIPT</h1>
 <p>Hold the Prime scanner to this QR (Sats Mail → send → <b>verify broadcast</b>) — it checks the txid against the one the Prime computed from the tx it signed.</p>
 <img src="${qr}">
 <div id="st">${st.label}</div>
+<div id="live">${renderLive(live)}</div>
 <pre>${receiptText(st, txid)}</pre>
-<div style="font-size:12px;color:#666;padding-top:8px">the receipt updates automatically as confirmations arrive — keep this page open.</div>
+<div style="font-size:12px;color:#666;padding-top:8px">the receipt updates automatically — keep this page open.</div>
 <script>
 const txid = ${JSON.stringify(txid)};
+function fmtAge(s){if(s==null)return null;if(s<60)return s+'s';const m=Math.floor(s/60);const r=s%60;return m+'m'+(r?' '+r+'s':'');}
+function renderLive(j){
+  const parts=[];
+  if(j.age_sec!=null)parts.push('waiting '+fmtAge(j.age_sec));
+  if(j.height!=null)parts.push('height '+j.height);
+  if(j.fee_rate!=null&&j.next_fee!=null){
+    parts.push('your '+j.fee_rate+' sat/vB vs next-block '+j.next_fee+' sat/vB'+(j.fee_rate>=j.next_fee?' ✓ competitive':' — may wait'));
+  }else if(j.fee_rate!=null){parts.push('your fee '+j.fee_rate+' sat/vB');}
+  return parts.join(' · ');
+}
+function apply(j){
+  document.getElementById('st').textContent=j.label;
+  document.getElementById('st').style.color=j.status==='confirmed'?'#7ee787':'#e3b341';
+  document.getElementById('live').textContent=renderLive(j);
+  if(j.status==='confirmed'){
+    document.querySelector('img').src=j.qr;
+    document.querySelector('pre').textContent='satsmail-receipt:'+j.status+':'+txid+(j.confs?':'+j.confs:'');
+  }
+}
+apply(${JSON.stringify(Object.assign({ status: st.status, label: st.label }, live))});
 setInterval(async () => {
   try {
     const r = await fetch('/txstatus?txid=' + encodeURIComponent(txid));
-    const j = await r.json();
-    if (j.status === 'confirmed') {
-      document.getElementById('st').textContent = j.label;
-      document.querySelector('img').src = j.qr;
-      document.querySelector('pre').textContent = 'satsmail-receipt:' + j.status + ':' + txid + (j.confs ? ':' + j.confs : '');
-    }
+    apply(await r.json());
   } catch (e) { /* phone briefly offline — keep the current QR */ }
 }, 5000);
 </script></body></html>`;
+}
+
+// Server-side twin of the page's renderLive — builds the initial live-panel
+// text so it's filled on first paint, not after the first 5 s poll.
+function renderLive(live) {
+  const parts = [];
+  if (live.age_sec != null) parts.push('waiting ' + fmtAge(live.age_sec));
+  if (live.height != null) parts.push('height ' + live.height);
+  if (live.fee_rate != null && live.next_fee != null) {
+    parts.push('your ' + live.fee_rate + ' sat/vB vs next-block ' + live.next_fee + ' sat/vB' + (live.fee_rate >= live.next_fee ? ' ✓ competitive' : ' — may wait'));
+  } else if (live.fee_rate != null) {
+    parts.push('your fee ' + live.fee_rate + ' sat/vB');
+  }
+  return parts.join(' · ');
+}
+
+function fmtAge(sec) {
+  if (sec == null) return null;
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  const r = sec % 60;
+  return m + 'm' + (r ? ' ' + r + 's' : '');
 }
 
 // The /broadcast page: decodes the #t=/#c= fragment the device QR carries,

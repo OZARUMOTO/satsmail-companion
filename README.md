@@ -62,7 +62,10 @@ blocks until you re-pair).
     tx) + a **verify broadcast** button: scan the receipt and the Prime
     compares txids — a lying box can't fake a hash of the tx the Prime
     itself signed. The receipt QR upgrades from mempool → confirmed as
-    confirmations arrive.
+    confirmations arrive. The receipt page also has a **live mempool panel**
+    under the QR (updates every 5 s): waiting time, current block height,
+    and your tx's fee rate vs the node's next-block estimate — so you can
+    see at a glance whether it's about to confirm or may wait.
 - **v0.3.16** — **paranoid sync**: added HMAC-SHA256 authentication to the
   QR sync channel. The box signs every payload with a pairing secret
   (`/pair` page, stored in `~/satsmail-companion/pairing-secret`); the Prime
